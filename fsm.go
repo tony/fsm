@@ -134,6 +134,14 @@ func NewFSM(initial string, events []EventDesc, callbacks map[string]Callback) *
 		var callbackType int
 
 		switch {
+		case strings.HasPrefix(name, "permit_"):
+			target = strings.TrimPrefix(name, "permit_")
+			if target == "event" {
+				target = ""
+				callbackType = callbackPermitEvent
+			} else if _, ok := allEvents[target]; ok {
+				callbackType = callbackPermitEvent
+			}
 		case strings.HasPrefix(name, "before_"):
 			target = strings.TrimPrefix(name, "before_")
 			if target == "event" {
@@ -194,6 +202,19 @@ func (f *FSM) Is(state string) bool {
 }
 
 // Can returns true if event can occur in the current state.
+// Check for Can() and beforePermitEvent.
+func (f *FSM) Permit(event string) bool {
+	_, ok := f.transitions[eKey{event, f.current}]
+	return ok && (f.transition == nil)
+}
+
+func (f *FSM) Forbidden(event string) bool {
+	return !f.Permit(event)
+}
+
+// Can returns true if event can occur in the current state.
+// Note: Does not check for permitCallbackEvent, only checks to see
+// if transitions is registered from the source event potentially.
 func (f *FSM) Can(event string) bool {
 	_, ok := f.transitions[eKey{event, f.current}]
 	return ok && (f.transition == nil)
@@ -239,7 +260,12 @@ func (f *FSM) Event(event string, args ...interface{}) error {
 
 	e := &Event{f, event, f.current, dst, nil, args, false, false}
 
-	err := f.beforeEventCallbacks(e)
+	err := f.permitEventCallbacks(e)
+	if err != nil {
+		return err
+	}
+
+	err = f.beforeEventCallbacks(e)
 	if err != nil {
 		return err
 	}
@@ -280,6 +306,25 @@ func (f *FSM) Transition() error {
 	}
 	f.transition()
 	f.transition = nil
+	return nil
+}
+
+// permitEventCallbacks calls the permit_ callbacks, first the named then the
+// general version. Useful for adding your own contextual data on top of eKey
+// transition.
+func (f *FSM) permitEventCallbacks(e *Event) error {
+	if fn, ok := f.callbacks[cKey{e.Event, callbackPermitEvent}]; ok {
+		fn(e)
+		if e.canceled {
+			return &CanceledError{e.Err}
+		}
+	}
+	if fn, ok := f.callbacks[cKey{"", callbackPermitEvent}]; ok {
+		fn(e)
+		if e.canceled {
+			return &CanceledError{e.Err}
+		}
+	}
 	return nil
 }
 
@@ -349,6 +394,7 @@ func (f *FSM) afterEventCallbacks(e *Event) {
 
 const (
 	callbackNone int = iota
+	callbackPermitEvent
 	callbackBeforeEvent
 	callbackLeaveState
 	callbackEnterState
